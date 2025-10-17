@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Script to collect spec decode training data by spamming requests through vLLM.
+Script to collect spec decode training data by sending requests through vLLM.
 
 This script:
 1. Downloads a dataset from HuggingFace
-2. Starts spec decode data collection
-3. Sends many inference requests to collect training data
-4. Monitors progress and stops when target is reached
+2. Sends inference requests to collect training data
+3. Monitors progress until target tokens are reached
 
 Prerequisites:
-    export VLLM_SERVER_DEV_MODE=1
     vllm serve <model_name> --port 8000
 
 Example:
     python collect_spec_decode_data.py \\
         --model meta-llama/Llama-2-7b-hf \\
-        --layers 0,8,16,24,31 \\
         --output-dir ./eagle_data \\
         --target-tokens 1000000 \\
         --concurrent-requests 10
@@ -23,7 +20,6 @@ Example:
 
 import argparse
 import asyncio
-import json
 import time
 from pathlib import Path
 from typing import Any
@@ -31,50 +27,6 @@ from typing import Any
 import requests
 from datasets import load_dataset
 from tqdm import tqdm
-
-
-def start_collection(
-    base_url: str,
-    output_dir: str,
-    layers: list[int] | None = None,
-    samples_per_file: int = 1000,
-    max_buffer_size: int = 100,
-    collect_logits: bool = True,
-    collect_hidden_states: bool = True,
-) -> dict[str, Any]:
-    """Start spec decode data collection."""
-    url = f"{base_url}/spec_decode/collection/start"
-
-    params = {
-        "output_dir": output_dir,
-        "samples_per_file": samples_per_file,
-        "max_buffer_size": max_buffer_size,
-        "collect_logits": str(collect_logits).lower(),
-        "collect_hidden_states": str(collect_hidden_states).lower(),
-    }
-
-    if layers:
-        params["hidden_state_layers"] = ",".join(map(str, layers))
-
-    response = requests.post(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-def stop_collection(base_url: str) -> dict[str, Any]:
-    """Stop spec decode data collection."""
-    url = f"{base_url}/spec_decode/collection/stop"
-    response = requests.post(url, timeout=30)
-    response.raise_for_status()
-    return response.json()
-
-
-def get_collection_status(base_url: str) -> dict[str, Any]:
-    """Get current collection status."""
-    url = f"{base_url}/spec_decode/collection/status"
-    response = requests.get(url, timeout=10)
-    response.raise_for_status()
-    return response.json()
 
 
 def send_inference_request(
@@ -427,12 +379,7 @@ def main():
         "--output-dir",
         type=str,
         default="./eagle_data",
-        help="Directory to save collected data",
-    )
-    parser.add_argument(
-        "--layers",
-        type=str,
-        help="Comma-separated list of layer indices (e.g., '0,8,16,24,31')",
+        help="Directory to save collected data (informational only)",
     )
     parser.add_argument(
         "--target-tokens",
@@ -495,25 +442,9 @@ def main():
         help="Maximum samples to load from dataset (default: 10000)",
     )
     parser.add_argument(
-        "--samples-per-file",
-        type=int,
-        default=1000,
-        help="Samples per output file (default: 1000)",
-    )
-    parser.add_argument(
         "--no-async",
         action="store_true",
         help="Disable async requests (use sync instead)",
-    )
-    parser.add_argument(
-        "--no-collect-logits",
-        action="store_true",
-        help="Don't collect logits",
-    )
-    parser.add_argument(
-        "--no-collect-hidden-states",
-        action="store_true",
-        help="Don't collect hidden states",
     )
 
     args = parser.parse_args()
@@ -537,14 +468,9 @@ def main():
 
     print(f"✓ Server is reachable")
 
-    # Parse layers
-    layers = None
-    if args.layers:
-        layers = [int(x.strip()) for x in args.layers.split(",")]
-
     # Load dataset
     print("="*60)
-    print("Step 1: Loading dataset")
+    print("Loading dataset")
     print("="*60)
     prompts = load_hf_dataset(
         args.dataset,
@@ -556,36 +482,11 @@ def main():
         print("Error: No prompts loaded!")
         return 1
 
-    # Start collection
+    # Send inference requests
     print("\n" + "="*60)
-    print("Step 2: Starting spec decode data collection")
+    print("Sending inference requests")
     print("="*60)
-    print(f"  Output directory: {args.output_dir}")
-    if layers:
-        print(f"  Layers to collect: {layers}")
-    else:
-        print(f"  Collecting all layers")
     print(f"  Target tokens: {args.target_tokens:,}")
-
-    try:
-        result = start_collection(
-            base_url=args.base_url,
-            output_dir=args.output_dir,
-            layers=layers,
-            samples_per_file=args.samples_per_file,
-            collect_logits=not args.no_collect_logits,
-            collect_hidden_states=not args.no_collect_hidden_states,
-        )
-        print(f"✓ Collection started successfully")
-        print(f"  Config: {json.dumps(result.get('config', {}), indent=2)}")
-    except Exception as e:
-        print(f"✗ Failed to start collection: {e}")
-        return 1
-
-    # Spam requests
-    print("\n" + "="*60)
-    print("Step 3: Spamming inference requests")
-    print("="*60)
     print(f"  Batch size: {args.batch_size} prompts per request")
     print(f"  Concurrent requests: {args.concurrent_requests}")
     print(f"  Max tokens per request: {args.max_tokens_per_request}")
@@ -658,38 +559,13 @@ def main():
         import traceback
         traceback.print_exc()
 
-    # Check final status
     print("\n" + "="*60)
-    print("Step 4: Checking collection status")
+    print("✓ Request workflow completed!")
     print("="*60)
-    try:
-        status = get_collection_status(args.base_url)
-        print(f"  Samples collected: {status.get('total_samples_collected', 'N/A')}")
-        print(f"  Files written: {status.get('files_written', 'N/A')}")
-        print(f"  Buffer size: {status.get('buffer_size', 'N/A')}")
-    except Exception as e:
-        print(f"  Could not get status: {e}")
-
-    # Stop collection
-    print("\n" + "="*60)
-    print("Step 5: Stopping data collection")
-    print("="*60)
-    try:
-        result = stop_collection(args.base_url)
-        print(f"✓ Collection stopped successfully")
-        if "final_stats" in result:
-            print(f"  Final stats: {json.dumps(result['final_stats'], indent=2)}")
-    except Exception as e:
-        print(f"✗ Failed to stop collection: {e}")
-
-    print("\n" + "="*60)
-    print("✓ Data collection workflow completed!")
-    print("="*60)
-    print(f"\nCollected data saved to: {args.output_dir}")
+    print(f"\nData should be saved to: {args.output_dir}")
     print(f"\nNext steps:")
-    print(f"  1. Analyze the data: python {__file__} --analyze {args.output_dir}")
-    print(f"  2. Train an EAGLE-style draft model with the collected data")
-    print(f"  3. Deploy the draft model with vLLM's speculative decoding")
+    print(f"  1. Train an EAGLE-style draft model with the collected data")
+    print(f"  2. Deploy the draft model with vLLM's speculative decoding")
 
     return 0
 
